@@ -16,6 +16,7 @@ const environment = require('../../../utils/environment');
 const retry = require('../../../utils/retry');
 const log = require('../../../utils/logger').child({ __filename });
 const argparse = require('../../../utils/argparse');
+const sleep = require('../../../utils/sleep');
 
 const DetoxEmulatorsPortRange = {
   min: 10000,
@@ -24,6 +25,7 @@ const DetoxEmulatorsPortRange = {
 
 const ACQUIRE_DEVICE_EV = 'ACQUIRE_DEVICE';
 const EMU_BIN_STABLE_SKIN_VER = 28;
+const DEVICE_LAUNCH_SUSPEND_TIME_MS = 1500;
 
 class EmulatorDriver extends AndroidDriver {
   constructor(config) {
@@ -52,9 +54,10 @@ class EmulatorDriver extends AndroidDriver {
     await this._avdValidator.validate(avdName);
     await this._fixEmulatorConfigIniSkinNameIfNeeded(avdName);
 
-    const adbName = await this._allocateDevice(avdName);
+    const deviceInfo = await this._allocateDevice(avdName);
+    const adbName = deviceInfo.deviceId;
 
-    await this._boot(avdName, adbName);
+    await this._boot(avdName, deviceInfo);
 
     await this.adb.apiLevel(adbName);
     await this.adb.unlockScreen(adbName);
@@ -88,10 +91,12 @@ class EmulatorDriver extends AndroidDriver {
     return this._emuVersionResolver.resolve();
   }
 
-  async _boot(avdName, adbName) {
+  async _boot(avdName, deviceInfo) {
+    const adbName = deviceInfo.deviceId;
     const coldBoot = !!this.pendingBoots[adbName];
 
     if (coldBoot) {
+      await this._suspendLaunchIfNeeded(deviceInfo);
       const port = this.pendingBoots[adbName];
       await this._emuLauncher.launch(avdName, { port });
       delete this.pendingBoots[adbName];
@@ -99,6 +104,15 @@ class EmulatorDriver extends AndroidDriver {
 
     await this._waitForBootToComplete(adbName);
     await this.emitter.emit('bootDevice', { coldBoot, deviceId: adbName, type: adbName });
+  }
+
+  async _suspendLaunchIfNeeded(deviceInfo) {
+    const { deviceIndex } = deviceInfo;
+    if (deviceIndex) {
+      const delay = DEVICE_LAUNCH_SUSPEND_TIME_MS * deviceIndex;
+      log.debug({ event: ACQUIRE_DEVICE_EV }, `Suspending boot of ${deviceInfo.deviceId} for ${delay}ms (index is ${deviceIndex})`);
+      await sleep(delay);
+    }
   }
 
   async _waitForBootToComplete(deviceId) {
@@ -156,9 +170,9 @@ class EmulatorDriver extends AndroidDriver {
 
   async _allocateDevice(avdName) {
     log.debug({ event: ACQUIRE_DEVICE_EV }, `Looking up a device based on ${avdName}`);
-    const adbName = await this.deviceRegistry.allocateDevice(() => this._doAllocateDevice(avdName));
-    log.debug({ event: ACQUIRE_DEVICE_EV }, `Settled on ${adbName}`);
-    return adbName;
+    const deviceInfo = await this.deviceRegistry.allocateDevice(() => this._doAllocateDevice(avdName));
+    log.debug({ event: ACQUIRE_DEVICE_EV }, `Settled on ${deviceInfo.deviceId}`);
+    return deviceInfo;
   }
 
   async _doAllocateDevice(avdName) {
